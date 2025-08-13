@@ -1,0 +1,5 @@
+python-binance
+websocket-client
+python-dotenv
+tabulate
+

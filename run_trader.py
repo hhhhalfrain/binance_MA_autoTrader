@@ -80,11 +80,7 @@ def compute_and_print_ma_table(engine: MarketDataEngine, symbol: str, intervals,
     return all_ready, target_ratio
 
 def main():
-    api_key = os.getenv("API_KEY")
-    api_secret = os.getenv("API_SECRET")
-    if not api_key or not api_secret:
-        print("请先在 .env 中配置 API_KEY/API_SECRET")
-        return
+
 
     cfg = load_config()
     symbols   = [s.upper() for s in cfg.get("symbols", ["BTCUSDT"])]
@@ -94,6 +90,16 @@ def main():
     dry_run = cfg.get("dry_run", True)
     testnet = cfg.get("testnet", True)
     weights = cfg.get("weights", None)
+
+    api_key = os.getenv("API_KEY")
+    api_secret = os.getenv("API_SECRET")
+    if not api_key or not api_secret:
+        cfg_api_key = cfg.get("api_key", None)
+        cfg_api_secret = cfg.get("api_secret", None)
+        if not cfg_api_key or not cfg_api_secret:
+            print("请先在 .env 或 config.json 文件中配置 API_KEY/API_SECRET")
+            return
+
     per_symbol_order_type = {k.upper(): v for k, v in cfg.get("per_symbol_order_type", {}).items()}
 
     client = Client(api_key, api_secret, testnet=testnet)
