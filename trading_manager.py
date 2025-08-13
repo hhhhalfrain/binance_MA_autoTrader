@@ -345,6 +345,7 @@ class TradingManager:
         target_ratio = total_weighted / 3.0  # 0..1
         return target_ratio, details
 
+
     def _log_signal_details(self, symbol: str, target_ratio: float, details: List[Dict[str, Any]], reason: str):
         logger.info(f"[Signal] {symbol} reason={reason} → target_ratio={target_ratio:.4f}")
         if self.debug:
