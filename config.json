@@ -1,22 +1,25 @@
 {
-  "symbols": ["BTCUSDT"],
-  "intervals": ["5m", "15m", "1h", "4h", "1d"],
+  "symbols": ["ETHUSDC","SOLUSDC","DOGEUSDC"],
+  "intervals": ["15m", "1h", "4h", "1d"],
   "allocations": {
-    "BTCUSDT": 3
+    "ETHUSDC": 1,
+    "SOLUSDC": 1,
+    "DOGEUSDC" : 1
   },
   "weights" : {
-    "5m": 0,
-    "15m": 1,
-    "1h": 0,
-    "4h": 0,
-    "1d": 0
+    "15m": 0.3,
+    "1h": 0.2,
+    "4h": 0.2,
+    "1d": 0.3
   }
   ,
-  "mode": "long",
+  "mode": "both",
   "per_symbol_order_type": {
-    "BTCUSDT": "tracking"
+    "ETHUSDC": "tracking",
+    "SOLUSDC": "tracking",
+    "DOGEUSDC" : "tracking"
   },
   "dry_run": false,
-  "testnet": true,
+  "testnet": false,
   "debug" : true
 }
