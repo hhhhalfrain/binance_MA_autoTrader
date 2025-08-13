@@ -452,7 +452,7 @@ class TradingManager:
             self.trackers[key] = tracker
             logger.info(f"[tracking] started tracker for {symbol} {side} qty={qty_adj}")
         else:
-            logger.warning(f"[reconcile] unknown order_type {order_type} for {symbol}")
+            logger.warning(f"[reconcile] unknown order_type {order_type} for {symbol}, try market or tracking")
 
     # ===== 手动事件：直接使用指定净仓位比 =====
     def _manual_reconcile(self, symbol: str, net_frac: float, order_type: Optional[str] = None):

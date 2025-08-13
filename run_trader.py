@@ -93,6 +93,7 @@ def main():
     mode = cfg.get("mode", "both")
     dry_run = cfg.get("dry_run", True)
     testnet = cfg.get("testnet", True)
+    weights = cfg.get("weights", None)
     per_symbol_order_type = {k.upper(): v for k, v in cfg.get("per_symbol_order_type", {}).items()}
 
     client = Client(api_key, api_secret, testnet=testnet)
@@ -101,7 +102,7 @@ def main():
     engine = MarketDataEngine(symbols, intervals, api_key, api_secret,
                               max_len=MAX_LEN, testnet=testnet)
 
-    trader = TradingManager(engine, client, allocations, mode=mode, dry_run=dry_run, testnet=testnet)
+    trader = TradingManager(engine, client, allocations, mode=mode, dry_run=dry_run, testnet=testnet, base_weights=weights)
     trader.per_symbol_order_type.update(per_symbol_order_type)
 
     # 1) 启动行情引擎（回填 + WS）

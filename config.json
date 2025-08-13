@@ -1,12 +1,20 @@
 {
   "symbols": ["BTCUSDT"],
-  "intervals": ["1m", "15m", "1h", "4h", "1d"],
+  "intervals": ["5m", "15m", "1h", "4h", "1d"],
   "allocations": {
-    "BTCUSDT": 0.5
+    "BTCUSDT": 3
   },
-  "mode": "both",
+  "weights" : {
+    "5m": 0,
+    "15m": 1,
+    "1h": 0,
+    "4h": 0,
+    "1d": 0
+  }
+  ,
+  "mode": "long",
   "per_symbol_order_type": {
-    "BTCUSDT": "market"
+    "BTCUSDT": "tracking"
   },
   "dry_run": false,
   "testnet": true,
