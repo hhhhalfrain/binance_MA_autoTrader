@@ -100,6 +100,7 @@ def main():
             print("请先在 .env 或 config.json 文件中配置 API_KEY/API_SECRET")
             return
 
+
     per_symbol_order_type = {k.upper(): v for k, v in cfg.get("per_symbol_order_type", {}).items()}
 
     client = Client(api_key, api_secret, testnet=testnet)
