@@ -1,0 +1,32 @@
+{
+  "API_KEY":"",
+  "API_SECRET":"",
+  "symbols": ["ETHUSDC","SOLUSDC","DOGEUSDC","BNBUSDC","XRPUSDC","BTCUSDC","ENAUSDC"],
+  "intervals": ["15m"],
+  "allocations": {
+    "ETHUSDC": 0,
+    "SOLUSDC": 0,
+    "DOGEUSDC" : 0,
+    "BNBUSDC" : 0,
+    "XRPUSDC" : 0,
+    "BTCUSDC": 10,
+    "ENAUSDC" : 0
+  },
+  "weights" : {
+    "15m": 1
+  }
+  ,
+  "mode": "both",
+  "per_symbol_order_type": {
+    "ETHUSDC": "tracking",
+    "SOLUSDC": "tracking",
+    "DOGEUSDC" : "tracking",
+    "BNBUSDC" : "tracking",
+    "XRPUSDC" : "tracking",
+    "BTCUSDC": "tracking",
+    "ENAUSDC": "tracking"
+  },
+  "dry_run": false,
+  "testnet": false,
+  "debug" : true
+}
