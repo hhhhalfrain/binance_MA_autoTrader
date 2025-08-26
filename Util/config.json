@@ -1,9 +1,9 @@
 {
   "API_KEY": "",
   "API_SECRET": "",
-  "symbols": ["ETHUSDC","SOLUSDC","DOGEUSDC","BNBUSDC","XRPUSDC","BTCUSDC"],
-  "intervals": ["15m", "1h", "4h", "1d"],
-  "max_k": 100,
-  "testnet": true,
+  "symbols": ["BTCUSDT"],
+  "intervals": ["15m"],
+  "max_k": 1500,
+  "testnet": false,
   "debug": true
 }
