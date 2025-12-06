@@ -21,7 +21,7 @@ from typing import Dict, Any, Optional, Tuple
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-from config_manager import ConfigManager
+from Util.config_manager import ConfigManager
 
 def _floor_to_step(value: float, step: float) -> float:
     """按交易所给定的步进 step 向下截断（用于数量/价格截断）"""
@@ -593,6 +593,259 @@ class TradingModule:
             "order": resp
         }
 
+    def last_price_offset_maker_track(
+            self,
+            symbol: str,
+            qty: float,
+            side: str,
+            offset: float,
+            poll_interval: float = 0.5,
+            reduce_only: bool = False,
+            position_side: Optional[str] = None,
+            min_query_delay: Optional[float] = None,
+            max_2013_retries: int = 6,
+    ) -> bool:
+        """
+        盘口成交价挂单交易（Post Only，阻塞直到完全成交才返回 True）
+        - 锚点：最新成交价 last price ± offset；BUY 用 last-offset，SELL 用 last+offset
+        - 价格对齐：BUY 向下取 tick，SELL 向上取 tick；再与 bestBid/bestAsk 夹紧，降低 GTX 拒单
+        - 仅当活动订单“未成交量 >= minQty”时才撤单换价；否则保留等待，避免把剩余打到 <minQty 的死局
+        - 仅当订单状态 FILLED 才返回 True；其它情况（含 <minQty 余量）均不返回 True
+        - 下单后等待 min_query_delay 再查，规避期货端 -2013 竞态；查单优先用 origClientOrderId
+        - 发生无法继续推进且无活动订单时（例如余量 < minQty 且无单可等），抛异常
+        """
+        import uuid
+        side = (side or "").upper()
+        if side not in ("BUY", "SELL"):
+            raise ValueError("side 只能为 BUY 或 SELL")
+        if qty <= 0:
+            raise ValueError("qty 必须为正数")
+        if offset < 0:
+            raise ValueError("offset(偏差值) 不能为负")
+
+        lot, price_filter = self._get_symbol_filters(symbol)
+        if not lot or not price_filter:
+            raise RuntimeError(f"未找到 {symbol} 的交易规则（LOT_SIZE/PRICE_FILTER）")
+
+        step_str = lot.get("stepSize", "0.0")
+        tick_str = price_filter.get("tickSize", "0.0")
+        min_qty = float(lot.get("minQty", "0.0"))
+
+        initial_qty = _quantize_to_step(qty, step_str, "floor")
+        if min_qty > 0 and initial_qty < min_qty:
+            raise ValueError(f"下单数量 {qty} 截断后 {initial_qty} 小于最小下单量 {min_qty}")
+
+        remaining_qty = initial_qty
+        cumulative_filled = 0.0
+        order_reported_executed = 0.0
+
+        active_order_id: Optional[int] = None
+        active_client_oid: Optional[str] = None
+        active_price: Optional[float] = None
+
+        # 下单后至少等待这么久再查，避免 -2013；默认取 max(0.35, poll_interval)
+        min_q_delay = max(0.35, poll_interval if (min_query_delay is None) else min_query_delay)
+        last_place_ts: float = 0.0
+        retry_2013 = 0
+
+        def _get_last_price() -> Optional[float]:
+            try:
+                t = self.client.futures_symbol_ticker(symbol=symbol)
+                if t and t.get("price") is not None:
+                    return float(t["price"])
+            except Exception:
+                pass
+            try:
+                t24 = self.client.futures_ticker(symbol=symbol)
+                if t24 and t24.get("lastPrice") is not None:
+                    return float(t24["lastPrice"])
+            except Exception:
+                pass
+            return None
+
+        while True:
+            # 如果刚刚下单，先等一等再查，避免 -2013
+            if active_order_id is not None and (time.time() - last_place_ts) < min_q_delay:
+                time.sleep(min_q_delay - (time.time() - last_place_ts))
+
+            # 读取价格参考
+            last = _get_last_price()
+            if last is None:
+                self.logger.debug("[LPO] 获取最新成交价失败，稍后重试")
+                time.sleep(poll_interval)
+                continue
+
+            ob = self.client.futures_orderbook_ticker(symbol=symbol)
+            best_bid = float(ob["bidPrice"]);
+            best_ask = float(ob["askPrice"])
+            try:
+                mark = self.get_mark_price(symbol)
+            except Exception:
+                mark = None
+
+            # 目标价
+            if side == "BUY":
+                raw = max(0.0, last - float(offset))
+                q_price = _quantize_to_step(raw, tick_str, "floor")
+                target_price = q_price if q_price <= best_bid else best_bid
+            else:
+                raw = last + float(offset)
+                q_price = _quantize_to_step(raw, tick_str, "ceil")
+                target_price = q_price if q_price >= best_ask else best_ask
+            price_str = _decimal_str(target_price)
+
+            # 首次挂单
+            if active_order_id is None:
+                if remaining_qty <= 0:
+                    # 只有状态=FILLED 才会走 return True，这里代表我们没有活动单且余量=0 -> 不应出现
+                    raise RuntimeError("[LPO] 余量为 0 但无活动订单，状态不一致")
+                if min_qty > 0 and remaining_qty < min_qty:
+                    # 无法新挂（数量不达标）且没有老单可等，视为无法继续推进
+                    raise RuntimeError(
+                        f"[LPO] 剩余 {remaining_qty} < minQty {min_qty}，且无活动订单可等待，无法完全成交"
+                    )
+
+                qty_str = _decimal_str(remaining_qty)
+                params = dict(
+                    symbol=symbol,
+                    side=side,
+                    type="LIMIT",
+                    timeInForce="GTX",
+                    quantity=qty_str,
+                    price=price_str,
+                    newClientOrderId=f"LPO_{uuid.uuid4().hex[:20]}",
+                )
+                if reduce_only:   params["reduceOnly"] = True
+                if position_side: params["positionSide"] = position_side
+
+                try:
+                    resp = self.client.futures_create_order(**params)
+                    active_order_id = resp.get("orderId")
+                    active_client_oid = resp.get("clientOrderId") or params["newClientOrderId"]
+                    active_price = target_price
+                    order_reported_executed = 0.0
+                    last_place_ts = time.time()
+                    retry_2013 = 0
+                    self.logger.info(
+                        "[LPO] %s %s qty=%s @%s 已挂单（last=%.8f, bid=%.8f, ask=%.8f, mark=%s）。",
+                        symbol, side, qty_str, price_str, last, best_bid, best_ask,
+                        f"{mark:.8f}" if mark is not None else "NA"
+                    )
+                except BinanceAPIException as oe:
+                    # GTX 拒单或精度报错 -> 下一轮重算价再试
+                    self.logger.debug("[LPO] 下单失败/GTX拒单：%s", oe)
+                    time.sleep(poll_interval)
+                    continue
+
+            # 轮询活动订单
+            try:
+                # 用 origClientOrderId 优先查，规避 -2013
+                od = None
+                if active_client_oid:
+                    try:
+                        od = self.client.futures_get_order(symbol=symbol, origClientOrderId=active_client_oid)
+                    except BinanceAPIException as e1:
+                        if e1.code != -2013:
+                            raise
+                if od is None and active_order_id is not None:
+                    od = self.client.futures_get_order(symbol=symbol, orderId=active_order_id)
+
+                st = od.get("status")
+                exec_now = float(od.get("executedQty", "0"))
+                orig_qty = float(od.get("origQty", remaining_qty))
+
+                # 增量成交
+                delta = max(0.0, exec_now - order_reported_executed)
+                if delta > 0:
+                    cumulative_filled += delta
+                    remaining_qty = _quantize_to_step(max(0.0, initial_qty - cumulative_filled), step_str, "floor")
+                    order_reported_executed = exec_now
+                    self.logger.info("[LPO] 已成交 %.10f，剩余 %.10f", delta, remaining_qty)
+
+                if st == "FILLED":
+                    self.logger.info("[LPO] 订单完全成交：orderId=%s", active_order_id)
+                    return True
+
+                if st in ("CANCELED", "REJECTED", "EXPIRED"):
+                    # 单子确实没了；清空，下一轮会重挂剩余（若剩余>=minQty，否则抛错）
+                    active_order_id = None
+                    active_client_oid = None
+                    active_price = None
+                    order_reported_executed = 0.0
+                    continue
+
+                # 计算是否需要换价：仅当未成交量 >= minQty 才允许撤单
+                unfilled_active = max(0.0, float(orig_qty) - exec_now)
+                need_replace = (active_price != target_price) and (unfilled_active >= (min_qty if min_qty > 0 else 0.0))
+
+                if need_replace:
+                    # 撤单 -> 可能再补一跳增量
+                    try:
+                        if active_order_id:
+                            self.client.futures_cancel_order(symbol=symbol, orderId=active_order_id)
+                        elif active_client_oid:
+                            self.client.futures_cancel_order(symbol=symbol, origClientOrderId=active_client_oid)
+                        self.logger.debug("[LPO] 撤单进行换价（未成交量=%.10f）", unfilled_active)
+                    except BinanceAPIException as ce:
+                        self.logger.debug("[LPO] 撤单提示：%s", ce)
+
+                    # 撤单后补最后一跳
+                    try:
+                        od2 = None
+                        if active_client_oid:
+                            od2 = self.client.futures_get_order(symbol=symbol, origClientOrderId=active_client_oid)
+                        if od2 is None and active_order_id:
+                            od2 = self.client.futures_get_order(symbol=symbol, orderId=active_order_id)
+                        exec_final = float((od2 or od).get("executedQty", exec_now))
+                    except Exception:
+                        exec_final = exec_now
+
+                    delta2 = max(0.0, exec_final - order_reported_executed)
+                    if delta2 > 0:
+                        cumulative_filled += delta2
+                        remaining_qty = _quantize_to_step(max(0.0, initial_qty - cumulative_filled), step_str, "floor")
+                        order_reported_executed = exec_final
+                        self.logger.info("[LPO] 撤单后补记增量 %.10f，剩余 %.10f", delta2, remaining_qty)
+
+                    # 清空活动单，下一轮按新价重挂“剩余部分”
+                    active_order_id = None
+                    active_client_oid = None
+                    active_price = None
+                    order_reported_executed = 0.0
+                    continue
+
+                # 不换价就等下一轮
+                time.sleep(poll_interval)
+                retry_2013 = 0
+
+            except BinanceAPIException as e:
+                if e.code == -2013:
+                    # 订单短暂不可见：保持活动状态不要清空，退避等待后重查
+                    retry_2013 += 1
+                    self.logger.debug("[LPO] 查询订单 -2013（第 %d 次），等待后重试", retry_2013)
+                    if retry_2013 > max_2013_retries:
+                        # 超过重试仍不可见，视为异常而非成交
+                        raise RuntimeError("[LPO] 多次 -2013 后订单仍不可见，放弃并中止")
+                    time.sleep(min_q_delay)
+                    continue
+                else:
+                    self.logger.exception("[LPO] 查单异常：%s", e)
+                    raise
+            except Exception as e:
+                self.logger.exception("[LPO] 异常：%s", e)
+                raise
+
 
 if __name__ == "__main__":
     tm = TradingModule(config_path="config.json")
+
+    # 例如：买入 25 张 BTCUSDT 永续，挂在 “最新成交价 - 2.5 美元”
+    ok = tm.last_price_offset_maker_track(
+        symbol="BTCUSDT",
+        qty=0.2,
+        side="BUY",
+        offset=10,
+        poll_interval=0.3,  # 可调
+    )
+    print("filled:", ok)
+
