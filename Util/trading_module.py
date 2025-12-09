@@ -1,16 +1,3 @@
-"""
-量化交易 - 交易模块（单线程）
-功能：
-  1) 市价交易（按合约张数，向下截断最小步进）
-  2) 限价只挂单追踪交易（Post Only，价格变动则撤单重下）
-  3) 获取当前仓位大小与方向
-  4) 获取合约账户中某币种余额
-  5) 获取某币种最新指数价格（Index Price）
-
-说明：
-  - 使用 .env 存放 API_KEY / API_SECRET（testnet 用 TEST_API_KEY/TEST_API_SECRET）
-  - 若 .env 存在则忽略 JSON 中的 API 字段
-"""
 
 import os
 import json
@@ -411,32 +398,108 @@ class TradingModule:
     # -----------------------------
     # 3) 获取当前仓位大小（张数）与方向
     # -----------------------------
+    # -----------------------------
+    # 3) 获取当前仓位大小（张数）、方向和开仓均价
+    # -----------------------------
     def get_position(self, symbol: str) -> Dict[str, Any]:
         """
         返回：
-          - qty: float（>0 表示多头，<0 表示空头，=0 表示无仓）
+          - qty: float
+              > 0 表示多头
+              < 0 表示空头
+              = 0 表示无仓
           - direction: "LONG" / "SHORT" / "FLAT"
-        说明：基于 USDⓈ-M futures 的 positionAmt 字段。
-        """
-        try:
-            info = self.client.futures_position_information(symbol=symbol)
-            if not info:
-                return {"qty": 0.0, "direction": "FLAT"}
+          - entry_price: float 或 None
+              有仓位时为当前持仓的开仓均价（entryPrice）
+              无仓位时为 None
 
-            # 单向持仓模式：通常只会有一条记录
-            pos_amt = float(info[0].get("positionAmt", "0"))
-            if pos_amt > 0:
-                return {"qty": pos_amt, "direction": "LONG"}
-            elif pos_amt < 0:
-                return {"qty": pos_amt, "direction": "SHORT"}
+        实现说明：
+          - 基于 USDⓈ-M futures 的 futures_account().positions
+          - 仅按 symbol 匹配；若 positionAmt 的绝对值非常接近 0，则视为无仓位
+        """
+        symbol = symbol.upper()
+        try:
+            acct = self.client.futures_account()
+            positions = acct.get("positions", [])
+
+            # 单向持仓模式下通常每个 symbol 只有一条；
+            # 若是对冲模式，则可能有 LONG/SHORT 两条，这里简单处理为：
+            #   优先返回第一条 positionAmt != 0 的记录；
+            #   如果都为 0，则视为无仓位。
+            candidate_zero_record = None
+
+            for p in positions:
+                if p.get("symbol") != symbol:
+                    continue
+
+                # 记录一份“确实有这个 symbol，但仓位为 0”的情况
+                if candidate_zero_record is None:
+                    candidate_zero_record = p
+
+                pos_amt = float(p.get("positionAmt", "0"))
+
+                # 有实际仓位（多或空）
+                if abs(pos_amt) >= 1e-12:
+                    direction = "LONG" if pos_amt > 0 else "SHORT"
+
+                    entry_str = p.get("entryPrice")
+                    entry_price: Optional[float] = None
+                    if entry_str is None:
+                        self.logger.warning(
+                            "symbol=%s 的 position 记录中缺少 entryPrice 字段：%s",
+                            symbol, p
+                        )
+                    else:
+                        try:
+                            entry_price = float(entry_str)
+                        except ValueError:
+                            self.logger.warning(
+                                "symbol=%s 的 entryPrice 解析失败：%s",
+                                symbol, entry_str
+                            )
+                            entry_price = None
+
+                    self.logger.debug(
+                        "symbol=%s 当前仓位: positionAmt=%s, direction=%s, entryPrice=%s",
+                        symbol, pos_amt, direction, entry_price
+                    )
+                    return {
+                        "qty": pos_amt,
+                        "direction": direction,
+                        "entry_price": entry_price,
+                    }
+
+            # 能走到这里有两种情况：
+            # 1) 有这个 symbol 的记录，但 positionAmt == 0 -> 无仓位
+            # 2) 根本没有这个 symbol 的记录           -> 无仓位
+            if candidate_zero_record is not None:
+                self.logger.debug(
+                    "symbol=%s 存在 position 记录，但 positionAmt=0，视为无仓位。",
+                    symbol
+                )
             else:
-                return {"qty": 0.0, "direction": "FLAT"}
+                self.logger.info(
+                    "futures_account.positions 中未找到 symbol=%s 的记录，视为无仓位。",
+                    symbol
+                )
+
+            return {
+                "qty": 0.0,
+                "direction": "FLAT",
+                "entry_price": None,
+            }
 
         except BinanceAPIException as e:
-            self.logger.error("获取持仓失败：%s", e)
+            self.logger.error("获取 %s 仓位失败：%s", symbol, e)
         except Exception as e:
-            self.logger.exception("解析持仓异常：%s", e)
-        return {"qty": 0.0, "direction": "FLAT"}
+            self.logger.exception("解析 %s 仓位异常：%s", symbol, e)
+
+        # 兜底：出错时也统一返回“无仓位”的结构，避免上层崩
+        return {
+            "qty": 0.0,
+            "direction": "FLAT",
+            "entry_price": None,
+        }
 
     # -----------------------------
     # 4) 获取合约账户中某币种余额
@@ -519,7 +582,7 @@ class TradingModule:
         min_qty  = float(lot.get("minQty", "0.0")) if lot else 0.0
 
         # 目标口径：负数表示清仓
-        target = 0.0 if target_qty < 0 else float(target_qty)
+        target =  float(target_qty)
 
         # 读取当前仓位（单向：>0 多头，<0 空头）
         cur = self.get_position(symbol)    # {'qty': float, 'direction': ...}
@@ -834,18 +897,72 @@ class TradingModule:
             except Exception as e:
                 self.logger.exception("[LPO] 异常：%s", e)
                 raise
+    # -----------------------------
+    # 6) 获取某合约当前杠杆倍数
+    # -----------------------------
+    def get_symbol_leverage(self, symbol: str) -> Optional[float]:
+        """
+        获取当前账户在指定合约上的杠杆倍数（例如返回 5.0 表示 5x）。
+
+        逻辑：
+          1) 优先调用 futures_position_information(symbol=symbol)
+             - 某些环境会返回空列表，这种情况继续走兜底方案。
+          2) 若为空，则调用 futures_account()，在返回的 positions 里按 symbol 查找杠杆。
+             - positions 通常会列出所有合约的杠杆设置，即便当前无持仓。
+
+        参数：
+          - symbol: 合约交易对名称，如 "BTCUSDT", "ETHUSDC" 等（注意要用 Binance 官方的 futures 符号）
+
+        返回：
+          - float 杠杆倍数，例如 5.0
+          - 查询失败或未找到时返回 None
+        """
+        symbol = symbol.upper()
+
+        try:
+            acct = self.client.futures_account()
+            positions = acct.get("positions", [])
+            for p in positions:
+                if p.get("symbol") == symbol:
+                    lev_str = p.get("leverage")
+                    if lev_str is None:
+                        self.logger.warning(
+                            "futures_account.positions 中缺少 leverage 字段：%s", p
+                        )
+                        return None
+                    lev = float(lev_str)
+                    self.logger.debug(
+                        "通过 futures_account.positions 获取到 %s 杠杆=%s",
+                        symbol, lev
+                    )
+                    return lev
+
+            # 如果走到这里，说明两个地方都没找到这个 symbol
+            self.logger.warning("账户中未找到该合约的杠杆信息：%s", symbol)
+            return None
+
+        except BinanceAPIException as e:
+            self.logger.error("获取 %s 杠杆失败（BinanceAPIException）：%s", symbol, e)
+        except Exception as e:
+            self.logger.exception("获取 %s 杠杆时发生异常：%s", symbol, e)
+
+        return None
+
 
 
 if __name__ == "__main__":
-    tm = TradingModule(config_path="config.json")
-
-    # 例如：买入 25 张 BTCUSDT 永续，挂在 “最新成交价 - 2.5 美元”
-    ok = tm.last_price_offset_maker_track(
-        symbol="BTCUSDT",
-        qty=0.2,
-        side="BUY",
-        offset=10,
-        poll_interval=0.3,  # 可调
+    tm = TradingModule(config_path="./config.json")
+    sym = "ETHUSDC"
+    ok = tm.get_symbol_leverage("ETHUSDC")
+    tm.adjust_position(
+        symbol="ETHUSDC",
+        target_qty=0.01,
+        mode="track",
+        duration_sec=60,
+        poll_interval=0.5,
     )
-    print("filled:", ok)
+    pos_info = tm.get_position(sym)
+    print(f"{sym} position:", pos_info)
+
+
 
